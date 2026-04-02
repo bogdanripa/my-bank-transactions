@@ -1,0 +1,10 @@
+{
+  "name": "my-bank-transactions",
+  "private": true,
+  "scripts": {
+    "dev": "npm run dev:server & npm run dev:frontend",
+    "dev:server": "cd server && npm run dev",
+    "dev:frontend": "cd frontend && npm run dev",
+    "install:all": "cd server && npm install && cd ../frontend && npm install"
+  }
+}
