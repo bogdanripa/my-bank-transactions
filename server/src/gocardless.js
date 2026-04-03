@@ -3,12 +3,61 @@ dotenv.config();
 
 const BASE_URL = 'https://bankaccountdata.gocardless.com/api/v2';
 
+let accessToken = null;
+let tokenExpiry = 0;
+let refreshToken = null;
+let refreshExpiry = 0;
+
+async function getToken() {
+  // Use cached token if still valid
+  if (accessToken && Date.now() < tokenExpiry) return accessToken;
+
+  // Try refresh if we have a valid refresh token
+  if (refreshToken && Date.now() < refreshExpiry) {
+    const res = await fetch(`${BASE_URL}/token/refresh/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh: refreshToken }),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      accessToken = data.access;
+      tokenExpiry = Date.now() + (data.access_expires - 30) * 1000;
+      return accessToken;
+    }
+  }
+
+  // Get new token pair
+  const res = await fetch(`${BASE_URL}/token/new/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      secret_id: process.env.GOCARDLESS_SECRET_ID,
+      secret_key: process.env.GOCARDLESS_SECRET_KEY,
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`GoCardless auth failed: ${res.status} ${err}`);
+  }
+
+  const data = await res.json();
+  accessToken = data.access;
+  tokenExpiry = Date.now() + (data.access_expires - 30) * 1000;
+  refreshToken = data.refresh;
+  refreshExpiry = Date.now() + (data.refresh_expires - 30) * 1000;
+  return accessToken;
+}
+
 async function apiCall(path, options = {}) {
+  const token = await getToken();
   const res = await fetch(`${BASE_URL}${path}`, {
     ...options,
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${process.env.GOCARDLESS_API_KEY}`,
+      Authorization: `Bearer ${token}`,
       ...options.headers,
     },
   });
