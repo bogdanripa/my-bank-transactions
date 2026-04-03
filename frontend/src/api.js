@@ -51,8 +51,11 @@ export const requisitions = {
   list: () => request('/requisitions'),
   create: (data) =>
     request('/requisitions', { method: 'POST', body: JSON.stringify(data) }),
-  complete: (id) =>
-    request(`/requisitions/${id}/complete`, { method: 'POST' }),
+  complete: (id, code) =>
+    request(`/requisitions/${id}/complete`, {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    }),
   delete: (id) => request(`/requisitions/${id}`, { method: 'DELETE' }),
 };
 

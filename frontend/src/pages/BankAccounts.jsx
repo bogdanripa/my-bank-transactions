@@ -65,15 +65,16 @@ export default function BankAccounts() {
     setAdding(true);
     try {
       const result = await requisitions.create({
-        institution_id: bank.id,
+        aspsp_name: bank.aspsp_name,
+        aspsp_country: bank.aspsp_country,
         institution_name: bank.name,
         institution_logo: bank.logo,
-        institution_country: country,
         redirect_url: window.location.origin + '/callback',
       });
-      // Open the bank auth link
-      window.open(result.link, '_blank');
-      loadRequisitions();
+      // Save the requisition ID so the callback can find it
+      localStorage.setItem('pending_requisition_id', result.id);
+      // Redirect to bank auth
+      window.location.href = result.link;
     } catch (err) {
       alert(err.message);
     }

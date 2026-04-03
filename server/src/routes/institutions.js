@@ -1,13 +1,22 @@
 import { Router } from 'express';
-import db from '../db.js';
-import { listInstitutions } from '../gocardless.js';
+import { listAspsps } from '../enablebanking.js';
 
 const router = Router();
 
-// List institutions for a country
+// List available banks for a country
 router.get('/:country', async (req, res) => {
   try {
-    const institutions = await listInstitutions(req.params.country);
+    const aspsps = await listAspsps(req.params.country);
+    // Normalize to a consistent format
+    const institutions = aspsps.map((a) => ({
+      id: `${a.country}_${a.name}`,
+      name: a.name,
+      country: a.country,
+      logo: a.logo || null,
+      // Keep original fields for the auth flow
+      aspsp_name: a.name,
+      aspsp_country: a.country,
+    }));
     res.json(institutions);
   } catch (err) {
     res.status(500).json({ error: err.message });

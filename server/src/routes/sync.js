@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import db from '../db.js';
-import { getAccountTransactions } from '../gocardless.js';
+import { getAllTransactions } from '../enablebanking.js';
 import { v4 as uuidv4 } from 'uuid';
 
 const router = Router();
@@ -11,7 +11,6 @@ function resolveThirdParty(rawName, userId) {
   const normalized = rawName.trim();
   if (!normalized) return null;
 
-  // Check if this alias already exists for this user
   const existing = db
     .prepare(
       'SELECT third_party_id FROM third_party_aliases WHERE alias = ? AND user_id = ?'
@@ -20,7 +19,6 @@ function resolveThirdParty(rawName, userId) {
 
   if (existing) return existing.third_party_id;
 
-  // Create a new third party with this name
   const result = db
     .prepare('INSERT INTO third_parties (user_id, display_name) VALUES (?, ?)')
     .run(userId, normalized);
@@ -35,17 +33,21 @@ function resolveThirdParty(rawName, userId) {
 }
 
 function extractName(tx) {
+  // Enable Banking transaction fields
   return (
+    tx.creditor_name ||
+    tx.debtor_name ||
     tx.creditorName ||
     tx.debtorName ||
+    tx.remittance_information ||
     tx.remittanceInformationUnstructured ||
-    tx.remittanceInformationStructured ||
-    tx.additionalInformation ||
+    tx.description ||
+    tx.additional_information ||
     null
   );
 }
 
-function syncAccountTransactions(account, booked, userId) {
+function syncAccountTransactions(account, txList, userId) {
   let inserted = 0;
   let skipped = 0;
 
@@ -57,32 +59,54 @@ function syncAccountTransactions(account, booked, userId) {
 
   const insertMany = db.transaction((transactions) => {
     for (const tx of transactions) {
-      const txId = tx.transactionId || tx.internalTransactionId || uuidv4();
+      const txId =
+        tx.transaction_id ||
+        tx.entry_reference ||
+        tx.internal_transaction_id ||
+        tx.transactionId ||
+        tx.internalTransactionId ||
+        uuidv4();
+
       const rawName = extractName(tx);
-      const thirdPartyId = resolveThirdParty(
-        tx.creditorName || tx.debtorName || null,
-        userId
-      );
+      const counterpartyName =
+        tx.creditor_name || tx.debtor_name ||
+        tx.creditorName || tx.debtorName ||
+        null;
+      const thirdPartyId = resolveThirdParty(counterpartyName, userId);
 
       const remittance =
+        tx.remittance_information ||
         tx.remittanceInformationUnstructured ||
         tx.remittanceInformationStructured ||
-        (tx.remittanceInformationUnstructuredArray || []).join(' ') ||
+        tx.description ||
         null;
+
+      // Amount can be in different formats depending on the bank
+      let amount = 0;
+      let currency = account.currency;
+      if (tx.transaction_amount) {
+        amount = parseFloat(tx.transaction_amount.amount || 0);
+        currency = tx.transaction_amount.currency || currency;
+      } else if (tx.transactionAmount) {
+        amount = parseFloat(tx.transactionAmount.amount || 0);
+        currency = tx.transactionAmount.currency || currency;
+      } else if (tx.amount != null) {
+        amount = parseFloat(tx.amount);
+      }
 
       const result = insertStmt.run(
         txId,
         userId,
         account.id,
-        tx.bookingDate || null,
-        tx.valueDate || null,
-        parseFloat(tx.transactionAmount?.amount || 0),
-        tx.transactionAmount?.currency || account.currency,
+        tx.booking_date || tx.bookingDate || null,
+        tx.value_date || tx.valueDate || null,
+        amount,
+        currency,
         rawName,
         thirdPartyId,
         remittance,
-        tx.additionalInformation || null,
-        tx.internalTransactionId || null
+        tx.additional_information || tx.additionalInformation || null,
+        tx.internal_transaction_id || tx.internalTransactionId || null
       );
 
       if (result.changes > 0) inserted++;
@@ -90,7 +114,7 @@ function syncAccountTransactions(account, booked, userId) {
     }
   });
 
-  insertMany(booked);
+  insertMany(txList);
   return { inserted, skipped };
 }
 
@@ -108,15 +132,14 @@ router.post('/account/:accountId', async (req, res) => {
       ? account.last_synced_at.split('T')[0]
       : null;
 
-    const data = await getAccountTransactions(account.id, dateFrom);
-    const booked = data.transactions?.booked || [];
-    const { inserted, skipped } = syncAccountTransactions(account, booked, userId);
+    const txList = await getAllTransactions(account.id, dateFrom);
+    const { inserted, skipped } = syncAccountTransactions(account, txList, userId);
 
     db.prepare(
       "UPDATE bank_accounts SET last_synced_at = datetime('now') WHERE id = ? AND user_id = ?"
     ).run(account.id, userId);
 
-    res.json({ inserted, skipped, total: booked.length });
+    res.json({ inserted, skipped, total: txList.length });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -137,9 +160,8 @@ router.post('/all', async (req, res) => {
           ? account.last_synced_at.split('T')[0]
           : null;
 
-        const data = await getAccountTransactions(account.id, dateFrom);
-        const booked = data.transactions?.booked || [];
-        const { inserted, skipped } = syncAccountTransactions(account, booked, userId);
+        const txList = await getAllTransactions(account.id, dateFrom);
+        const { inserted, skipped } = syncAccountTransactions(account, txList, userId);
 
         db.prepare(
           "UPDATE bank_accounts SET last_synced_at = datetime('now') WHERE id = ? AND user_id = ?"
@@ -150,7 +172,7 @@ router.post('/all', async (req, res) => {
           name: account.name,
           inserted,
           skipped,
-          total: booked.length,
+          total: txList.length,
         });
       } catch (err) {
         results.push({

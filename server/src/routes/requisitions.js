@@ -1,88 +1,81 @@
 import { Router } from 'express';
+import { v4 as uuidv4 } from 'uuid';
 import db from '../db.js';
-import {
-  createRequisition,
-  getRequisition,
-  getAccountDetails,
-  deleteRequisition,
-} from '../gocardless.js';
+import { startAuth, createSession, getSession } from '../enablebanking.js';
 
 const router = Router();
 
-// Create a new requisition (bank connection)
+// Start bank authorization flow
 router.post('/', async (req, res) => {
   try {
-    const { institution_id, redirect_url } = req.body;
+    const { aspsp_name, aspsp_country, redirect_url, institution_name, institution_logo } = req.body;
     const userId = req.userId;
+    const state = uuidv4();
+    const institutionId = `${aspsp_country}_${aspsp_name}`;
 
     // Save institution if not exists
     db.prepare(
       'INSERT OR IGNORE INTO institutions (id, name, logo, country) VALUES (?, ?, ?, ?)'
-    ).run(
-      institution_id,
-      req.body.institution_name || institution_id,
-      req.body.institution_logo || null,
-      req.body.institution_country || null
-    );
+    ).run(institutionId, institution_name || aspsp_name, institution_logo || null, aspsp_country);
 
-    const result = await createRequisition(institution_id, redirect_url);
+    const result = await startAuth({
+      aspspName: aspsp_name,
+      aspspCountry: aspsp_country,
+      redirectUrl: redirect_url,
+      state,
+    });
 
+    // Store the requisition with state as ID (we'll match on it when the callback comes)
     db.prepare(
       'INSERT INTO requisitions (id, user_id, institution_id, status, link) VALUES (?, ?, ?, ?, ?)'
-    ).run(result.id, userId, institution_id, result.status, result.link);
+    ).run(state, userId, institutionId, 'pending', result.url);
 
-    res.json(result);
+    res.json({ id: state, link: result.url });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Complete requisition - fetch accounts after user has authorized
+// Complete authorization - exchange code for session and fetch accounts
 router.post('/:id/complete', async (req, res) => {
   try {
     const userId = req.userId;
+    const { code } = req.body;
+    const reqId = req.params.id;
+
     const localReq = db
       .prepare('SELECT * FROM requisitions WHERE id = ? AND user_id = ?')
-      .get(req.params.id, userId);
+      .get(reqId, userId);
 
     if (!localReq) return res.status(404).json({ error: 'Requisition not found' });
 
-    const requisition = await getRequisition(req.params.id);
+    // Exchange auth code for session
+    const session = await createSession(code);
 
-    db.prepare('UPDATE requisitions SET status = ? WHERE id = ? AND user_id = ?').run(
-      requisition.status,
-      req.params.id,
-      userId
-    );
+    // Update requisition with session_id and mark as linked
+    db.prepare(
+      'UPDATE requisitions SET status = ?, link = ? WHERE id = ? AND user_id = ?'
+    ).run('LN', session.session_id, reqId, userId);
 
-    if (requisition.status !== 'LN') {
-      return res.json({ status: requisition.status, accounts: [] });
+    // Save accounts from the session
+    const accounts = session.accounts || [];
+    for (const acc of accounts) {
+      db.prepare(
+        `INSERT OR IGNORE INTO bank_accounts (id, user_id, requisition_id, institution_id, iban, name, owner_name, currency)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        acc.uid,
+        userId,
+        reqId,
+        localReq.institution_id,
+        acc.iban || null,
+        acc.account_name || acc.iban || acc.uid,
+        acc.owner_name || null,
+        acc.currency || null
+      );
     }
 
-    const accounts = [];
-    for (const accountId of requisition.accounts) {
-      try {
-        const details = await getAccountDetails(accountId);
-        db.prepare(
-          `INSERT OR IGNORE INTO bank_accounts (id, user_id, requisition_id, institution_id, iban, name, owner_name, currency)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-        ).run(
-          accountId,
-          userId,
-          req.params.id,
-          requisition.institution_id,
-          details.iban || null,
-          details.owner_name || details.iban || accountId,
-          details.owner_name || null,
-          details.currency || null
-        );
-        accounts.push({ id: accountId, ...details });
-      } catch (err) {
-        console.error(`Error fetching account ${accountId}:`, err.message);
-      }
-    }
-
-    res.json({ status: requisition.status, accounts });
+    res.json({ status: 'LN', accounts, session_id: session.session_id });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -118,11 +111,6 @@ router.delete('/:id', async (req, res) => {
 
     if (!localReq) return res.status(404).json({ error: 'Not found' });
 
-    try {
-      await deleteRequisition(req.params.id);
-    } catch (e) {
-      // Ignore if already deleted on GoCardless side
-    }
     db.prepare('DELETE FROM bank_accounts WHERE requisition_id = ? AND user_id = ?').run(
       req.params.id,
       req.userId
