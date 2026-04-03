@@ -1,4 +1,4 @@
-# My Bank Transactions
+# BankLens
 
 Multi-bank transaction tracker using GoCardless Bank Account Data API. Connect multiple bank accounts, sync all transactions, search, tag, and manage third parties across all your banks.
 

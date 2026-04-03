@@ -17,7 +17,7 @@ function Layout({ children }) {
         <div className="max-w-6xl mx-auto px-4 flex items-center justify-between h-14">
           <div className="flex items-center gap-6">
             <Link to="/" className="font-bold text-lg text-gray-900">
-              BankTracker
+              BankLens
             </Link>
             <Link
               to="/accounts"

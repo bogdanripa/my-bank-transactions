@@ -1,5 +1,5 @@
 {
-  "name": "my-bank-transactions",
+  "name": "bank-lens",
   "private": true,
   "scripts": {
     "dev": "npm run dev:server & npm run dev:frontend",
